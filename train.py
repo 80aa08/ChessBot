@@ -1,15 +1,17 @@
-# train.py - Główny plik treningowy
+import chess
 import torch
 import torch.optim as optim
 from model import ChessNet
 from mcts import MCTS
-from chess_helper import new_game, is_game_over, result, board_to_tensor, uci_index_map
+from chess_helper import new_game, is_game_over, result, board_to_tensor, uci_index_map, combined_reward
 import utils
 import random
+import os
+import datetime
 
 # Ustawienia treningu
 NUM_ITERATIONS = 10  # liczba iteracji treningowych
-GAMES_PER_ITERATION = 1  # liczba gier samouczenia na iterację
+GAMES_PER_ITERATION = 5  # liczba gier samouczenia na iterację
 MCTS_SIMULATIONS = 100  # liczba symulacji MCTS na każdy ruch
 STOCKFISH_PATH = "stockfish/stockfish.exe"  # ścieżka do Stockfisha
 BATCH_SIZE = 64  # rozmiar batchu do trenowania
@@ -48,12 +50,13 @@ def self_play_game(model, engine, stockfish_usage):
 
         game_states.append(state_tensor)
         mcts_policies.append(policy_probs)
-        if isinstance(move, str):
-            move = board.parse_uci(move)
-        moves_list.append(move.uci())
 
-        rewards.append(result(board))
+        moves_list.append(move.uci())
         board.push(move)
+        # Obliczamy nagrodę na podstawie wyniku gry i przewagi materialnej
+        final_reward = result(board)
+        shaped_reward = combined_reward(board, final_reward, color=chess.WHITE)  # Sprawdzic czy dobry kolor podaje
+        rewards.append(shaped_reward)
 
         if len(moves_list) >= 300:
             break
@@ -68,6 +71,10 @@ if __name__ == "__main__":
     optimizer = optim.Adam(model.parameters(), lr=LEARNING_RATE)
     engine = utils.init_stockfish(STOCKFISH_PATH)
 
+    current_time = datetime.datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
+    games_folder = f"games_{current_time}"
+    os.makedirs(games_folder, exist_ok=True)
+
     for iteration in range(1, NUM_ITERATIONS + 1):
         print(f"== Iteracja {iteration} ==")
         games_data = []
@@ -75,7 +82,7 @@ if __name__ == "__main__":
         for game_idx in range(GAMES_PER_ITERATION):
             states, policies, rewards, moves_list, game_result = self_play_game(model, engine, STOCKFISH_USAGE_RATE)
             print("GAME_IDX:", game_idx + 1)
-            utils.save_game_pgn_separate(moves_list, game_result, f"{iteration}_{game_idx + 1}")
+            utils.save_game_pgn_separate(moves_list, game_result, f"{iteration}_{game_idx + 1}", games_folder)
             for s, p, r in zip(states, policies, rewards):
                 games_data.append((s, p, r))
 
@@ -114,7 +121,8 @@ if __name__ == "__main__":
         # Stopniowe zmniejszanie użycia Stockfisha
         STOCKFISH_USAGE_RATE = max(MIN_STOCKFISH_USAGE, STOCKFISH_USAGE_RATE - STOCKFISH_DECAY)
 
-        utils.save_model(model, "chess_model.pth")
+        utils.save_model(model, f"chess_model_{iteration}.pth")
 
     utils.close_stockfish(engine)
+    utils.save_model(model, f"chess_model.pth")
     print("Trening zakończony. Model zapisany!")

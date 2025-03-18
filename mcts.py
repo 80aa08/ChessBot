@@ -40,10 +40,13 @@ class MCTS:
         self.engine = engine
         self.stockfish_enabled = stockfish_enabled
 
-    def search(self, board):
+    def search(self, board, temperature=1.0):
         root = MCTSNode(board)
+        # Rozwiń korzeń, aby mieć listę legalnych ruchów
+        policy_probs, _ = self.evaluate_state(board)
+        root.expand(policy_probs)
 
-        # 📌 Dodanie szumu Dirichleta dla większej różnorodności
+        # Dodanie szumu Dirichleta dla większej różnorodności
         if root.children:
             dirichlet_noise = np.random.dirichlet([0.03] * len(root.children))
             epsilon = 0.25  # Współczynnik eksploracji
@@ -54,7 +57,26 @@ class MCTS:
             value = self._simulate(root)
             self.backpropagate(root, value)
 
-        return max(root.children.items(), key=lambda x: x[1].visits)[0]
+        moves = list(root.children.keys())
+        visits = np.array([child.visits for child in root.children.values()])
+
+        if temperature == 0:
+            # Wybieramy ruch deterministycznie – ten z największą liczbą wizyt
+            chosen_uci = max(root.children.items(), key=lambda x: x[1].visits)[0]
+        else:
+            visits_temp = visits ** (1.0 / temperature)
+            total_visits = np.sum(visits_temp)
+            if total_visits == 0:
+                probs = np.ones_like(visits_temp) / len(visits_temp)
+            else:
+                probs = visits_temp / total_visits
+            chosen_uci = np.random.choice(moves, p=probs)
+
+        # Konwersja wybranego ruchu z UCI do obiektu ruchu
+        for move in board.legal_moves:
+            if move.uci() == chosen_uci:
+                return move
+        return None
 
     def _simulate(self, node):
         while node.children:

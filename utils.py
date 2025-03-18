@@ -5,6 +5,8 @@ import datetime
 import chess.pgn
 
 
+
+
 def get_device():
     return torch.device("cuda") if torch.cuda.is_available() else torch.device("cpu")
 
@@ -37,8 +39,8 @@ def close_stockfish(engine):
             pass
 
 
-def save_game_pgn_separate(moves_list, result, game_index):
-    file_name = f"game_{game_index}.pgn"
+def save_game_pgn_separate(moves_list, result, game_index, path):
+    file_name = os.path.join(path, f"game_{game_index}.pgn")
     game = chess.pgn.Game()
     game.headers["Event"] = "Self Play Training"
     game.headers["Date"] = datetime.datetime.now().strftime("%Y.%m.%d")
