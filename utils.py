@@ -3,8 +3,7 @@ import os
 import chess.engine
 import datetime
 import chess.pgn
-
-
+import csv
 
 
 def get_device():
@@ -55,3 +54,33 @@ def save_game_pgn_separate(moves_list, result, game_index, path):
     with open(file_name, "w") as f:
         f.write(str(game))
     print(f"[INFO] Zapisano grę w {file_name}")
+
+
+def get_last_game_index(file_path):
+    if not os.path.exists(file_path):
+        return 0
+    last_index = 0
+    with open(file_path, 'r', encoding='utf-8') as f:
+        reader = csv.reader(f)
+        header = next(reader, None)
+        for row in reader:
+            if row:
+                try:
+                    last_index = int(row[0])
+                except ValueError:
+                    continue
+    return last_index
+
+
+def save_game_result(game_result, sum_points, file_path="game_results.csv"):
+    file_exists = os.path.exists(file_path)
+    last_index = get_last_game_index(file_path)
+    new_index = last_index + 1
+
+    with open(file_path, 'a', newline='', encoding='utf-8') as csvfile:
+        writer = csv.writer(csvfile)
+        if not file_exists:
+            writer.writerow(["Game_Number", "Result", "Sum_Points"])
+        writer.writerow([new_index, game_result, sum_points])
+
+    print(f"[INFO] Zapisano wynik gry {new_index}: {game_result}, Suma punktów: {sum_points}")

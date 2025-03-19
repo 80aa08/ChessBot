@@ -80,6 +80,28 @@ def evaluate_center_control(board, color):
     return control
 
 
+def evaluate_endgame_enemy_king(board, color, piece_threshold=10, bonus=0.2):
+    if len(board.piece_map()) > piece_threshold:
+        return 0
+
+    enemy_color = not color
+    enemy_king_square = board.king(enemy_color)
+
+    corners = [chess.A1, chess.H1, chess.A8, chess.H8]
+
+    if enemy_king_square in corners:
+        return bonus
+
+    rank = chess.square_rank(enemy_king_square)
+    file = chess.square_file(enemy_king_square)
+    distances = [abs(rank - r) + abs(file - f) for r, f in [(0, 0), (0, 7), (7, 0), (7, 7)]]
+    min_distance = min(distances)
+
+    if min_distance <= 2:
+        return bonus * (3 - min_distance)
+    return 0
+
+
 def evaluate_development(board, color):
     developed = 0
     # Dla białych początkowy rząd to 0 (a1, b1, …, h1); dla czarnych to 7 (a8, …, h8)
@@ -136,7 +158,7 @@ def evaluate_pawn_structure(board, color):
     return -doubled  # ujemna wartość, gdyż zdublowane piony są niekorzystne
 
 
-def combined_reward(board, final_reward, alpha=0.5, color=chess.WHITE):
+def combined_reward(board, final_reward, alpha=0.9, color=chess.WHITE):
     """
     Łączy nagrodę końcową, nagrodę materialną i dodatkowe sygnały.
     Parametr alpha określa wagę wyniku końcowego i materialnego.
@@ -153,6 +175,7 @@ def combined_reward(board, final_reward, alpha=0.5, color=chess.WHITE):
     king_safety = evaluate_king_safety(board, color)
     piece_activity = evaluate_piece_activity(board, color)
     pawn_structure = evaluate_pawn_structure(board, color)
+    enemy_king_bonus = evaluate_endgame_enemy_king(board, color, piece_threshold=10, bonus=0.2)
 
     # Wagi dla poszczególnych komponentów – eksperymentuj, aby dobrać optymalne wartości
     w_center = 0.1
@@ -161,6 +184,7 @@ def combined_reward(board, final_reward, alpha=0.5, color=chess.WHITE):
     w_king = 0.1
     w_activity = 0.1
     w_pawn = 0.1
+    w_enemy_king = 1.0
 
     additional_reward = (
             w_center * center_control +
@@ -168,21 +192,9 @@ def combined_reward(board, final_reward, alpha=0.5, color=chess.WHITE):
             w_mobility * mobility +
             w_king * king_safety +
             w_activity * piece_activity +
-            w_pawn * pawn_structure
+            w_pawn * pawn_structure +
+            w_enemy_king * enemy_king_bonus
     )
-
+    win_bonus = 10 if final_reward == 1.0 else 0
     base_reward = alpha * final_reward + (1 - alpha) * material_reward
-    return base_reward + additional_reward
-
-
-def reward_shaping(board, final_reward, alpha=0.5):
-    """
-    Łączy nagrodę końcową (wynik gry) z nagrodą pośrednią opartą o przewagę materialną.
-
-    alpha: współczynnik balansujący znaczenie wyniku gry i przewagi materialnej.
-    """
-    material_advantage = evaluate_material(board)
-    # Zakładamy, że maksymalna przewaga materialna wynosi około 39 (skrajny przypadek)
-    max_material = 39
-    shaped_reward = material_advantage / max_material
-    return alpha * final_reward + (1 - alpha) * shaped_reward
+    return base_reward + additional_reward + win_bonus

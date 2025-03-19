@@ -36,7 +36,9 @@ def self_play_game(model, engine, stockfish_usage):
         for _ in range(random.randint(1, 4)):
             legal_moves = list(board.legal_moves)
             if legal_moves:
-                board.push(random.choice(legal_moves))
+                move = random.choice(legal_moves)
+                board.push(move)
+                moves_list.append(move.uci())
 
     mcts = MCTS(model, simulations=MCTS_SIMULATIONS, engine=engine, stockfish_enabled=stockfish_usage > random.random())
 
@@ -52,10 +54,12 @@ def self_play_game(model, engine, stockfish_usage):
         mcts_policies.append(policy_probs)
 
         moves_list.append(move.uci())
+
+        player_color = board.turn
         board.push(move)
         # Obliczamy nagrodę na podstawie wyniku gry i przewagi materialnej
         final_reward = result(board)
-        shaped_reward = combined_reward(board, final_reward, color=chess.WHITE)  # Sprawdzic czy dobry kolor podaje
+        shaped_reward = combined_reward(board, final_reward, color=player_color)  # Sprawdzic czy dobry kolor podaje
         rewards.append(shaped_reward)
 
         if len(moves_list) >= 300:
@@ -80,9 +84,11 @@ if __name__ == "__main__":
         games_data = []
 
         for game_idx in range(GAMES_PER_ITERATION):
-            states, policies, rewards, moves_list, game_result = self_play_game(model, engine, STOCKFISH_USAGE_RATE)
             print("GAME_IDX:", game_idx + 1)
+            states, policies, rewards, moves_list, game_result = self_play_game(model, engine, STOCKFISH_USAGE_RATE)
             utils.save_game_pgn_separate(moves_list, game_result, f"{iteration}_{game_idx + 1}", games_folder)
+            sum_points = sum(rewards)
+            utils.save_game_result(game_result, sum_points)
             for s, p, r in zip(states, policies, rewards):
                 games_data.append((s, p, r))
 
