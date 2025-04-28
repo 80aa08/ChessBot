@@ -20,19 +20,15 @@ class ResidualBlock(nn.Module):
 class ChessNet(nn.Module):
     def __init__(self):
         super().__init__()
-        # initial convolution
         self.conv = nn.Conv2d(Config.INPUT_CHANNELS, Config.CHANNELS, kernel_size=3, padding=1)
         self.bn = nn.BatchNorm2d(Config.CHANNELS)
         self.relu = nn.ReLU()
-        # residual tower
         self.res_blocks = nn.Sequential(*[
             ResidualBlock(Config.CHANNELS) for _ in range(Config.RESIDUAL_BLOCKS)
         ])
-        # policy head
         self.policy_conv = nn.Conv2d(Config.CHANNELS, 2, kernel_size=1)
         self.policy_bn = nn.BatchNorm2d(2)
-        self.policy_fc = nn.Linear(2 * 8 * 8, 4672)  # max legal moves
-        # value head
+        self.policy_fc = nn.Linear(2 * 8 * 8, 4672)
         self.value_conv = nn.Conv2d(Config.CHANNELS, 1, kernel_size=1)
         self.value_bn = nn.BatchNorm2d(1)
         self.value_fc1 = nn.Linear(1 * 8 * 8, Config.CHANNELS)
@@ -42,11 +38,9 @@ class ChessNet(nn.Module):
     def forward(self, x):
         x = self.relu(self.bn(self.conv(x)))
         x = self.res_blocks(x)
-        # policy
         p = self.relu(self.policy_bn(self.policy_conv(x)))
         p = p.view(p.size(0), -1)
         policy_logits = self.policy_fc(p)
-        # value
         v = self.relu(self.value_bn(self.value_conv(x)))
         v = v.view(v.size(0), -1)
         v = self.relu(self.value_fc1(v))
