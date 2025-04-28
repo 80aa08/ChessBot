@@ -1,86 +1,34 @@
-import torch
 import os
-import chess.engine
-import datetime
-import chess.pgn
-import csv
+import chess
+import numpy as np
+import torch
 
-
-def get_device():
-    return torch.device("cuda") if torch.cuda.is_available() else torch.device("cpu")
-
-
-def save_model(model, path):
-    torch.save(model.state_dict(), path)
-
-
-def load_or_initialize_model(model_class, path, device):
-    model = model_class().to(device)
-    if os.path.exists(path):
-        model.load_state_dict(torch.load(path, map_location=device))
-    return model
-
-
-def init_stockfish(path):
-    try:
-        engine = chess.engine.SimpleEngine.popen_uci(path)
-        return engine
-    except Exception as e:
-        print(f"Błąd inicjalizacji Stockfisha: {e}")
-        return None
-
-
-def close_stockfish(engine):
-    if engine:
-        try:
-            engine.quit()
-        except:
-            pass
-
-
-def save_game_pgn_separate(moves_list, result, game_index, path):
-    file_name = os.path.join(path, f"game_{game_index}.pgn")
-    game = chess.pgn.Game()
-    game.headers["Event"] = "Self Play Training"
-    game.headers["Date"] = datetime.datetime.now().strftime("%Y.%m.%d")
-    game.headers["Result"] = result
-    game.headers["White"] = "AI"
-    game.headers["Black"] = "AI"
-
-    node = game
-    for move in moves_list:
-        move_obj = chess.Move.from_uci(move)
-        node = node.add_variation(move_obj)
-    with open(file_name, "w") as f:
+# Save game to PGN
+def save_pgn(env, path="./games", prefix="game"):
+    os.makedirs(path, exist_ok=True)
+    game = chess.pgn.Game.from_board(env.board)
+    fname = f"{prefix}_{len(os.listdir(path))}.pgn"
+    with open(os.path.join(path, fname), 'w') as f:
         f.write(str(game))
-    print(f"[INFO] Zapisano grę w {file_name}")
 
+# Generate symmetric transformations
+def get_symmetries(state: np.ndarray, pi: np.ndarray):
+    syms = []
+    for k in [0,1,2,3]:  # rotations
+        s_rot = np.rot90(state, k, axes=(1,2))
+        pi_rot = np.rot90(pi.reshape(73,64), k).reshape(-1)
+        syms.append((s_rot, pi_rot))
+        # horizontal flip
+        s_flip = np.flip(s_rot, axis=2)
+        pi_flip = np.flip(pi_rot.reshape(73,64), axis=2).reshape(-1)
+        syms.append((s_flip, pi_flip))
+    return syms
 
-def get_last_game_index(file_path):
-    if not os.path.exists(file_path):
-        return 0
-    last_index = 0
-    with open(file_path, 'r', encoding='utf-8') as f:
-        reader = csv.reader(f)
-        header = next(reader, None)
-        for row in reader:
-            if row:
-                try:
-                    last_index = int(row[0])
-                except ValueError:
-                    continue
-    return last_index
-
-
-def save_game_result(game_result, sum_points, file_path="game_results.csv"):
-    file_exists = os.path.exists(file_path)
-    last_index = get_last_game_index(file_path)
-    new_index = last_index + 1
-
-    with open(file_path, 'a', newline='', encoding='utf-8') as csvfile:
-        writer = csv.writer(csvfile)
-        if not file_exists:
-            writer.writerow(["Game_Number", "Result", "Sum_Points"])
-        writer.writerow([new_index, game_result, sum_points])
-
-    print(f"[INFO] Zapisano wynik gry {new_index}: {game_result}, Suma punktów: {sum_points}")
+# Augment examples
+def augment_examples(examples):
+    augmented = []
+    for state, pi, z in examples:
+        s_np = state.numpy()
+        for s2, pi2 in get_symmetries(s_np, pi.numpy()):
+            augmented.append((torch.tensor(s2), torch.tensor(pi2), z))
+    return augmented

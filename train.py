@@ -1,134 +1,104 @@
-import chess
 import torch
 import torch.optim as optim
-from model import ChessNet
-from mcts import MCTS
-from chess_helper import new_game, is_game_over, result, board_to_tensor, uci_index_map, combined_reward
-import utils
-import random
+from torch.utils.data import DataLoader, Dataset
+from torch.utils.tensorboard import SummaryWriter
 import os
-import datetime
+from config import Config
+from model import ChessNet
+from chess_env import ChessEnv
+from mcts import MCTS
+from utils import save_pgn, augment_examples
 
-# Ustawienia treningu
-NUM_ITERATIONS = 10  # liczba iteracji treningowych
-GAMES_PER_ITERATION = 5  # liczba gier samouczenia na iterację
-MCTS_SIMULATIONS = 100  # liczba symulacji MCTS na każdy ruch
-STOCKFISH_PATH = "stockfish/stockfish.exe"  # ścieżka do Stockfisha
-BATCH_SIZE = 64  # rozmiar batchu do trenowania
-LEARNING_RATE = 0.001
+class SelfPlayDataset(Dataset):
+    def __init__(self, examples):
+        self.states, self.policies, self.values = zip(*examples)
+    def __len__(self): return len(self.states)
+    def __getitem__(self, idx): return self.states[idx], self.policies[idx], self.values[idx]
 
-# Parametry przejścia od Stockfisha do samodzielności
-USE_STOCKFISH = True
-STOCKFISH_USAGE_RATE = 1.0  # Początkowo pełna zależność od Stockfisha
-STOCKFISH_DECAY = 0.1  # Co ile iteracji zmniejszamy wpływ Stockfisha
-MIN_STOCKFISH_USAGE = 0.0  # Docelowa wartość (pełna samodzielność)
+def self_play(model, config, validation=False):
+    examples = []
+    env = ChessEnv()
+    mcts = MCTS(model, config)
+    games = config.NUM_VALIDATION_GAMES if validation else config.NUM_SELFPLAY_GAMES
+    for _ in range(games):
+        env.reset()
+        history = []
+        while True:
+            move = mcts.search(env)
+            state = env._get_state()
+            pi = ...  # extract visits distribution
+            history.append((state, pi))
+            _, reward, done = env.step(move)
+            if done:
+                for state, pi in history:
+                    examples.append((state, pi, reward))
+                save_pgn(env, path="./validation" if validation else "./games")
+                break
+    if config.USE_AUGMENT_SYMMETRIES:
+        examples = augment_examples(examples)
+    return examples
 
+def evaluate(model, examples, config):
+    model.eval()
+    device = next(model.parameters()).device
+    dataset = SelfPlayDataset(examples)
+    loader = DataLoader(dataset, batch_size=config.BATCH_SIZE)
+    total_loss = 0
+    with torch.no_grad():
+        for s, pi, z in loader:
+            s, pi, z = s.to(device), pi.to(device), z.to(device)
+            logits, value = model(s)
+            loss_p = -torch.mean(torch.sum(pi * torch.log_softmax(logits, dim=1), dim=1))
+            loss_v = torch.mean((z - value.view(-1))**2)
+            total_loss += (loss_p + loss_v).item() * s.size(0)
+    return total_loss / len(dataset)
 
-def self_play_game(model, engine, stockfish_usage):
-    """Symuluje jedną grę self-play."""
-    game_states = []
-    mcts_policies = []
-    rewards = []
-    moves_list = []
-    board = new_game()
+if __name__ == '__main__':
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    config = Config()
+    model = ChessNet().to(device)
+    if config.USE_TORCHSCRIPT:
+        model.eval()
+        example = torch.zeros(1, config.INPUT_CHANNELS, 8, 8).to(device)
+        scripted = torch.jit.trace(model, example)
+    optimizer = optim.Adam(model.parameters(), lr=config.LEARNING_RATE)
+    writer = SummaryWriter(config.LOG_DIR)
 
-    if random.random() < 0.2:
-        for _ in range(random.randint(1, 4)):
-            legal_moves = list(board.legal_moves)
-            if legal_moves:
-                move = random.choice(legal_moves)
-                board.push(move)
-                moves_list.append(move.uci())
+    best_val_loss = float('inf')
+    patience = 0
 
-    mcts = MCTS(model, simulations=MCTS_SIMULATIONS, engine=engine, stockfish_enabled=stockfish_usage > random.random())
+    for iteration in range(1, config.NUM_EPOCHS + 1):
+        examples = self_play(model, config)
+        dataset = SelfPlayDataset(examples)
+        loader = DataLoader(dataset, batch_size=config.BATCH_SIZE, shuffle=True)
 
-    while not is_game_over(board):
-        move = mcts.search(board)
-        if move is None:
-            break
-
-        state_tensor = board_to_tensor(board)
-        policy_probs, _ = mcts.evaluate_state(board)
-
-        game_states.append(state_tensor)
-        mcts_policies.append(policy_probs)
-
-        moves_list.append(move.uci())
-
-        player_color = board.turn
-        board.push(move)
-        # Obliczamy nagrodę na podstawie wyniku gry i przewagi materialnej
-        final_reward = result(board)
-        shaped_reward = combined_reward(board, final_reward, color=player_color)  # Sprawdzic czy dobry kolor podaje
-        rewards.append(shaped_reward)
-
-        if len(moves_list) >= 300:
-            break
-
-    game_result_str = "1-0" if result(board) == 1.0 else ("0-1" if result(board) == 0.0 else "1/2-1/2")
-    return game_states, mcts_policies, rewards, moves_list, game_result_str
-
-
-if __name__ == "__main__":
-    device = utils.get_device()
-    model = utils.load_or_initialize_model(ChessNet, "chess_model.pth", device)
-    optimizer = optim.Adam(model.parameters(), lr=LEARNING_RATE)
-    engine = utils.init_stockfish(STOCKFISH_PATH)
-
-    current_time = datetime.datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
-    games_folder = f"games_{current_time}"
-    os.makedirs(games_folder, exist_ok=True)
-
-    for iteration in range(1, NUM_ITERATIONS + 1):
-        print(f"== Iteracja {iteration} ==")
-        games_data = []
-
-        for game_idx in range(GAMES_PER_ITERATION):
-            print("GAME_IDX:", game_idx + 1)
-            states, policies, rewards, moves_list, game_result = self_play_game(model, engine, STOCKFISH_USAGE_RATE)
-            utils.save_game_pgn_separate(moves_list, game_result, f"{iteration}_{game_idx + 1}", games_folder)
-            sum_points = sum(rewards)
-            utils.save_game_result(game_result, sum_points)
-            for s, p, r in zip(states, policies, rewards):
-                games_data.append((s, p, r))
-
-        # Aktualizacja modelu
         model.train()
-        random.shuffle(games_data)
-        batch_count = max(1, len(games_data) // BATCH_SIZE)
-
-        for batch_idx in range(batch_count):
-            batch = games_data[batch_idx * BATCH_SIZE: (batch_idx + 1) * BATCH_SIZE]
-            states_batch = [s for s, _, _ in batch]
-
-            policy_batch = []
-            for _, p, _ in batch:
-                policy_vector = [0.0] * 4672
-                for move_uci, prob in p.items():
-                    if move_uci in uci_index_map():
-                        policy_vector[uci_index_map()[move_uci]] = prob
-                policy_batch.append(policy_vector)
-            value_batch = [r for _, _, r in batch]
-
-            state_tensor = torch.stack(states_batch).to(device)
-            policy_tensor = torch.tensor(policy_batch, dtype=torch.float32).to(device)
-            value_tensor = torch.tensor(value_batch, dtype=torch.float32).unsqueeze(1).to(device)
-
-            pred_policy, pred_value = model(state_tensor)
-
-            policy_loss = torch.sum(-policy_tensor * torch.log_softmax(pred_policy, dim=1)) / policy_tensor.size(0)
-            value_loss = torch.mean((pred_value - value_tensor) ** 2)
-            loss = policy_loss + value_loss
-
-            optimizer.zero_grad()
-            loss.backward()
-            optimizer.step()
-
-        # Stopniowe zmniejszanie użycia Stockfisha
-        STOCKFISH_USAGE_RATE = max(MIN_STOCKFISH_USAGE, STOCKFISH_USAGE_RATE - STOCKFISH_DECAY)
-
-        utils.save_model(model, f"chess_model_{iteration}.pth")
-
-    utils.close_stockfish(engine)
-    utils.save_model(model, f"chess_model.pth")
-    print("Trening zakończony. Model zapisany!")
+        for epoch in range(config.NUM_EPOCHS):
+            for i, (s, pi, z) in enumerate(loader):
+                s, pi, z = s.to(device), pi.to(device), z.to(device)
+                logits, value = model(s)
+                loss_p = -torch.mean(torch.sum(pi * torch.log_softmax(logits, dim=1), dim=1))
+                loss_v = torch.mean((z - value.view(-1))**2)
+                loss = loss_p + loss_v
+                optimizer.zero_grad()
+                loss.backward()
+                optimizer.step()
+                if i % 10 == 0:
+                    writer.add_scalar('Loss/total', loss.item(), iteration * len(loader) + i)
+        val_examples = self_play(model, config, validation=True)
+        val_loss = evaluate(model, val_examples, config)
+        writer.add_scalar('Loss/validation', val_loss, iteration)
+        if val_loss < best_val_loss:
+            best_val_loss = val_loss
+            patience = 0
+        else:
+            patience += 1
+        if patience > config.EARLY_STOPPING_PATIENCE:
+            print(f"Early stopping at iteration {iteration}")
+            break
+        if iteration % config.SAVE_INTERVAL == 0:
+            os.makedirs(config.MODEL_DIR, exist_ok=True)
+            torch.save(model.state_dict(), f"{config.MODEL_DIR}/model_iter_{iteration}.pt")
+            if config.USE_TORCHSCRIPT:
+                scripted.save(f"{config.MODEL_DIR}/model_iter_{iteration}.ptscript")
+    writer.close()
